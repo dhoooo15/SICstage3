@@ -1,0 +1,188 @@
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// === PIN CONFIGURATION ===
+#define DHTPIN 15
+#define DHTTYPE DHT11
+
+#define PIRPIN 13
+#define LDRPIN 34
+
+#define LED_MERAH 27
+#define LED_KUNING 26
+#define LED_HIJAU 25
+
+#define LED_CAHAYA_TERANG 19   // LED Hijau untuk cahaya terang
+#define LED_CAHAYA_GELAP 23    // LED Merah untuk cahaya gelap
+
+#define BUZZERPIN 12
+
+// === WIFI CONFIG ===
+const char* ssid = "OPPOA78";             // Ganti dengan SSID WiFi kamu
+const char* password = "ridho1501";       // Ganti dengan password WiFi kamu
+const char* token = "BBUS-pWBdotCiO0NOE1cCwrux1U4IablrP6"; // Ganti dengan token Ubidots kamu
+const char* server = "http://industrial.api.ubidots.com/api/v1.6/devices/smartroom";
+
+// === OBJECTS ===
+DHT dht(DHTPIN, DHTTYPE);
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// === THRESHOLD ===
+float suhu_threshold = 30.0;
+int ldr_threshold = 1000;
+bool gerakan_terdeteksi = false;
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+
+  pinMode(PIRPIN, INPUT);
+  pinMode(LED_MERAH, OUTPUT);
+  pinMode(LED_KUNING, OUTPUT);
+  pinMode(LED_HIJAU, OUTPUT);
+  pinMode(LED_CAHAYA_TERANG, OUTPUT); // LED Cahaya Terang
+  pinMode(LED_CAHAYA_GELAP, OUTPUT);  // LED Cahaya Gelap
+  pinMode(BUZZERPIN, OUTPUT);
+
+  // WiFi
+  WiFi.begin(ssid, password);
+  Serial.print("Menghubungkan ke WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Terhubung!");
+
+  // OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("OLED gagal!"));
+    while (true);
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.println("SmartRoom Monitor");
+  display.display();
+  delay(1000);
+}
+
+void kirimKeUbidots(float suhu, float kelembaban, int ldr, bool gerakan) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(server);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-Auth-Token", token);
+
+    String jsonData = "{\"suhu\":";
+    jsonData += String(suhu);
+    jsonData += ",\"kelembaban\":";
+    jsonData += String(kelembaban);
+    jsonData += ",\"cahaya\":";
+    jsonData += String(ldr);
+    jsonData += ",\"gerakan\":";
+    jsonData += gerakan ? "1" : "0";
+    jsonData += "}";
+
+    int httpResponseCode = http.POST(jsonData);
+
+    if (httpResponseCode > 0) {
+      String response = http.getString();
+      Serial.println("Data Terkirim: " + response);
+    } else {
+      Serial.print("Error kirim data, Code: ");
+      Serial.println(httpResponseCode);
+    }
+
+    http.end();
+  } else {
+    Serial.println("WiFi Tidak Terhubung");
+  }
+}
+
+void loop() {
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  int ldrValue = analogRead(LDRPIN);
+  int motion = digitalRead(PIRPIN);
+
+  gerakan_terdeteksi = (motion == HIGH);
+  bool kondisi_buruk = (t > suhu_threshold || ldrValue < ldr_threshold || gerakan_terdeteksi);
+  bool kondisi_waspada = (t >= suhu_threshold - 2 && t <= suhu_threshold);
+
+  // === LED STATUS SUHU ===
+  if (t < 24.0) {
+    // DINGIN - LED KUNING
+    digitalWrite(LED_MERAH, LOW);
+    digitalWrite(LED_KUNING, HIGH);
+    digitalWrite(LED_HIJAU, LOW);
+  } else if (t <= 30.0) {
+    // NORMAL - LED HIJAU
+    digitalWrite(LED_MERAH, LOW);
+    digitalWrite(LED_KUNING, LOW);
+    digitalWrite(LED_HIJAU, HIGH);
+  } else {
+    // PANAS - LED MERAH
+    digitalWrite(LED_MERAH, HIGH);
+    digitalWrite(LED_KUNING, LOW);
+    digitalWrite(LED_HIJAU, LOW);
+  }
+
+  // === LED STATUS CAHAYA ===
+  if (ldrValue < 800) {
+    // Cahaya Gelap - LED Merah
+    digitalWrite(LED_CAHAYA_GELAP, HIGH);  // Menyalakan LED Merah
+    digitalWrite(LED_CAHAYA_TERANG, LOW);  // Mematikan LED Hijau
+  } else if (ldrValue <= 2000) {
+    // Cahaya Normal - Tidak menyalakan LED apapun untuk cahaya
+    digitalWrite(LED_CAHAYA_GELAP, LOW);   // Mematikan LED Merah
+    digitalWrite(LED_CAHAYA_TERANG, LOW);  // Mematikan LED Hijau
+  } else {
+    // Cahaya Terang - LED Hijau
+    digitalWrite(LED_CAHAYA_GELAP, LOW);   // Mematikan LED Merah
+    digitalWrite(LED_CAHAYA_TERANG, HIGH); // Menyalakan LED Hijau
+  }
+
+  // Buzzer
+  digitalWrite(BUZZERPIN, gerakan_terdeteksi ? HIGH : LOW);
+
+  // Kirim ke Ubidots
+  kirimKeUbidots(t, h, ldrValue, gerakan_terdeteksi);
+
+  // Print serial
+  Serial.print("Suhu: "); Serial.print(t);
+  Serial.print(" C | Kelembaban: "); Serial.print(h);
+  Serial.print(" % | LDR: "); Serial.print(ldrValue);
+  Serial.print(" | Gerakan: "); Serial.println(gerakan_terdeteksi ? "YA" : "TIDAK");
+
+  // Tampilkan di OLED
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("SmartRoom Monitor");
+  display.print("Suhu: "); display.print(t); display.println(" C");
+  display.print("Lembab: "); display.print(h); display.println(" %");
+  display.print("Cahaya: "); display.println(ldrValue);
+  display.print("Gerakan: "); display.println(gerakan_terdeteksi ? "YA" : "TIDAK");
+  display.print("Status Suhu: "); 
+  if (t < 24.0) display.println("Dingin");
+  else if (t <= 30.0) display.println("Normal");
+  else display.println("Panas");
+  
+  display.print("Status Cahaya: "); 
+  if (ldrValue < 800) display.println("Gelap");
+  else if (ldrValue <= 2000) display.println("Normal");
+  else display.println("Terang");
+
+  display.display();
+
+  delay(10000);  // Delay 10 detik agar histori bisa masuk
+}
